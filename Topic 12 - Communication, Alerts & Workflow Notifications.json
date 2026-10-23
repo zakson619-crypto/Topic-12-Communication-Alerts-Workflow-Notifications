@@ -1,0 +1,388 @@
+{
+  "name": "Topic 12 - Communication, Alerts & Workflow Notifications",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "dcf7a689-4583-4f18-901c-c1a1846eede4",
+      "name": "Manual_Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -1168,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n  { json: { incidentId: \"INC-901\", service: \"payment-gateway\", errorSignature: \"AUTH_TIMEOUT_504\", message: \"Upstream bank gateway response latency exceeded 8000ms\", impactedUsers: 240, env: \"production\" } },\n  { json: { incidentId: \"INC-902\", service: \"payment-gateway\", errorSignature: \"AUTH_TIMEOUT_504\", message: \"Upstream bank gateway response latency exceeded 8200ms\", impactedUsers: 310, env: \"production\" } },\n  { json: { incidentId: \"INC-903\", service: \"search-indexer\", errorSignature: \"HEAP_MEMORY_WARN_85\", message: \"Elasticsearch node heap utilization exceeded 85%\", impactedUsers: 0, env: \"staging\" } }\n];"
+      },
+      "id": "9d93dea0-529c-4d89-94fa-297e0cdd319d",
+      "name": "Code_SimulateIncidents",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -944,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const staticData = $getWorkflowStaticData('global');\nstaticData.alertCache = staticData.alertCache || {};\nconst item = $input.item.json;\nconst now = Date.now();\nconst throttleWindowMs = 15 * 60 * 1000; // 15-minute suppression window\n\n// TTL cleanup to prevent unbounded cache growth\nfor (const k of Object.keys(staticData.alertCache)) {\n  if (now - staticData.alertCache[k] > throttleWindowMs * 4) delete staticData.alertCache[k];\n}\n\n// 1. Severity classification\nlet severity = \"P3_MINOR\";\nif (item.impactedUsers > 100 && item.env === \"production\") {\n  severity = \"P1_CRITICAL\";\n} else if (item.env === \"production\" || item.impactedUsers > 0) {\n  severity = \"P2_MAJOR\";\n}\n\n// 2. Throttling key by service + errorSignature\nconst throttleKey = `${item.service}:${item.errorSignature}`;\nconst lastAlertTime = staticData.alertCache[throttleKey] || 0;\nconst isThrottled = (now - lastAlertTime) < throttleWindowMs;\nif (!isThrottled) {\n  staticData.alertCache[throttleKey] = now;\n}\n\nreturn {\n  json: {\n    ...item,\n    severity: severity,\n    isThrottled: isThrottled,\n    shouldAlert: !isThrottled,\n    throttleKey: throttleKey,\n    evaluatedAt: new Date().toISOString()\n  }\n};"
+      },
+      "id": "0adc3b22-b2fa-4f6f-b706-a21138ef73f7",
+      "name": "Code_EvaluateSeverityAndThrottle",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -720,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "cond-should-alert",
+              "leftValue": "={{ $json.shouldAlert }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b325df90-ed7b-4f4d-84f5-a80432206c4a",
+      "name": "IF_IsThrottled",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -496,
+        208
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "return {\n  json: {\n    event: \"ALERT_SUPPRESSED_BY_THROTTLE_POLICY\",\n    reason: \"THROTTLED_COOLDOWN_ACTIVE\",\n    incidentId: $json.incidentId,\n    throttleKey: $json.throttleKey,\n    suppressedAt: new Date().toISOString()\n  }\n};"
+      },
+      "id": "762c2993-94b0-4eaa-bde6-0910cc4abc81",
+      "name": "Log_SuppressedAlert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -256,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "rule-P1",
+                    "leftValue": "={{ $json.severity }}",
+                    "rightValue": "P1_CRITICAL",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "P1"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "rule-P2",
+                    "leftValue": "={{ $json.severity }}",
+                    "rightValue": "P2_MAJOR",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "P2"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "leftValue": "",
+                  "typeValidation": "strict",
+                  "version": 2
+                },
+                "conditions": [
+                  {
+                    "id": "rule-P3",
+                    "leftValue": "={{ $json.severity }}",
+                    "rightValue": "P3_MINOR",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              },
+              "renameOutput": true,
+              "outputKey": "P3"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "79735f86-b09a-4786-bf15-f36e47e8c6c9",
+      "name": "Switch_RouteBySeverity",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        -256,
+        144
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const item = $input.item.json;\nconst blockKitPayload = {\n  channel: \"#critical-incidents\",\n  text: `🚨 P1 CRITICAL INCIDENT: ${item.service}`,\n  blocks: [\n    {\n      type: \"header\",\n      text: { type: \"plain_text\", text: `🚨 P1 CRITICAL: ${item.service.toUpperCase()}`, emoji: true }\n    },\n    {\n      type: \"section\",\n      fields: [\n        { type: \"mrkdwn\", text: `*Incident ID:*\\n\\`${item.incidentId}\\`` },\n        { type: \"mrkdwn\", text: `*Environment:*\\n\\`${item.env.toUpperCase()}\\`` },\n        { type: \"mrkdwn\", text: `*Impacted Users:*\\n*${item.impactedUsers}*` },\n        { type: \"mrkdwn\", text: `*Signature:*\\n\\`${item.errorSignature}\\`` }\n      ]\n    },\n    {\n      type: \"section\",\n      text: { type: \"mrkdwn\", text: `*Diagnostic Message:*\\n>${item.message}` }\n    }\n  ]\n};\nreturn { json: { incidentId: item.incidentId, severity: item.severity, dispatchPayload: blockKitPayload } };"
+      },
+      "id": "1e49fc79-312b-45c2-af19-75d55077f35f",
+      "name": "Code_BuildP1BlockKit",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const item = $input.item.json;\nconst payload = {\n  channel: \"#dev-alerts\",\n  text: `⚠️ *P2 MAJOR* | ${item.service} (${item.env})\\n*Incident:* ${item.incidentId}\\n*Signature:* ${item.errorSignature}\\n*Impacted Users:* ${item.impactedUsers}\\n>${item.message}`\n};\nreturn { json: { incidentId: item.incidentId, severity: item.severity, dispatchPayload: payload } };"
+      },
+      "id": "46dd551c-6042-4aa9-91a8-fe5544da7e83",
+      "name": "Code_BuildP2SlackCard",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const item = $input.item.json;\nreturn {\n  json: {\n    incidentId: item.incidentId,\n    severity: item.severity,\n    service: item.service,\n    message: item.message,\n    channel: \"digest_queue\",\n    digestStatus: \"STAGED\",\n    stagedAt: new Date().toISOString()\n  }\n};"
+      },
+      "id": "f3fae9c1-cd61-4d0c-88fb-fb5495864ab6",
+      "name": "Code_StageInDigestQueue",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        352
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://dummyjson.com/c/REPLACE-WITH-YOUR-ID",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.dispatchPayload) }}",
+        "options": {}
+      },
+      "id": "c0dc4381-c7ee-4123-9c60-6c658919363c",
+      "name": "HTTP_PostToMockSlack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        240,
+        80
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const resp = $input.item.json;\nreturn {\n  json: {\n    event: \"NOTIFICATION_DISPATCHED\",\n    channel: resp.channel || \"digest_queue\",\n    deliveryStatus: (resp.ok || resp.digestStatus) ? \"DELIVERED\" : \"QUEUED\",\n    timestamp: new Date().toISOString()\n  }\n};"
+      },
+      "id": "796a1d87-cd2b-4fe1-a283-5fa0e620450c",
+      "name": "Code_AuditNotificationDelivery",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        480,
+        208
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Manual_Trigger": {
+      "main": [
+        [
+          {
+            "node": "Code_SimulateIncidents",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code_SimulateIncidents": {
+      "main": [
+        [
+          {
+            "node": "Code_EvaluateSeverityAndThrottle",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code_EvaluateSeverityAndThrottle": {
+      "main": [
+        [
+          {
+            "node": "IF_IsThrottled",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF_IsThrottled": {
+      "main": [
+        [
+          {
+            "node": "Switch_RouteBySeverity",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Log_SuppressedAlert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Switch_RouteBySeverity": {
+      "main": [
+        [
+          {
+            "node": "Code_BuildP1BlockKit",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code_BuildP2SlackCard",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Code_StageInDigestQueue",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code_BuildP1BlockKit": {
+      "main": [
+        [
+          {
+            "node": "HTTP_PostToMockSlack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code_BuildP2SlackCard": {
+      "main": [
+        [
+          {
+            "node": "HTTP_PostToMockSlack",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Code_StageInDigestQueue": {
+      "main": [
+        [
+          {
+            "node": "Code_AuditNotificationDelivery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_PostToMockSlack": {
+      "main": [
+        [
+          {
+            "node": "Code_AuditNotificationDelivery",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "cfc8993b-a34c-4881-b515-e447647a76b9",
+  "meta": {
+    "instanceId": "a03c7678428ef19ededbf912f16f7d5798ec7b9ab4c17f2a2def6a9e791e7215"
+  },
+  "nodeGroups": [],
+  "id": "dID1cvHGIwV9tseI",
+  "tags": []
+}
